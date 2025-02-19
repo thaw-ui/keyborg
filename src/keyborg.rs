@@ -349,7 +349,7 @@ impl Keyborg {
     }
 
     /// callback - Called when the keyboard navigation state changes
-    pub fn subscribe(&mut self, callback: KeyborgCallback) {
-        self.cb.push(callback);
+    pub fn subscribe(&mut self, callback: impl Fn(bool) + Send + Sync + 'static) {
+        self.cb.push(Box::new(callback));
     }
 }
