@@ -456,20 +456,20 @@ impl Keyborg {
         }
     }
 
-    pub fn dispose(self) {
-        let Self { id, core, .. } = self;
+    pub fn dispose(&self) {
+        let Self { id, .. } = self;
         let current = KEYBORG_MAP.get().unwrap_throw();
 
         let (is_remove, is_empty) = if let Some(current) = current.write().unwrap_throw().as_mut() {
-            current.refs.remove(&id);
+            current.refs.remove(id);
 
-            (current.refs.remove(&id).is_some(), current.refs.is_empty())
+            (current.refs.remove(id).is_some(), current.refs.is_empty())
         } else {
             Default::default()
         };
 
         if is_remove && is_empty {
-            drop(core);
+            // drop(core);
             *current.write().unwrap_throw() = None;
         }
 
