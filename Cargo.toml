@@ -9,6 +9,7 @@ web-sys = { version = "0.3.70", features = [
     "CustomEvent",
     "console",
     "FocusEvent",
+    "KeyboardEvent",
     "MouseEvent",
     "HtmlElement",
     "Window"
