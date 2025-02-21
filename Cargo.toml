@@ -7,12 +7,14 @@ edition = "2021"
 web-sys = { version = "0.3.70", features = [
     "Document",
     "CustomEvent",
+    "CustomEventInit",
     "console",
     "FocusEvent",
     "KeyboardEvent",
     "MouseEvent",
     "HtmlElement",
-    "Window"
+    "Window",
+    "ShadowRoot",
 ] }
 wasm-bindgen = "0.2.100"
 js-sys = "0.3.77"

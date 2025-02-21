@@ -1,3 +1,4 @@
+use crate::focus_event::{dispose_focus_event, setup_focus_event, KEYBORG_FOCUSIN};
 use gloo_events::{EventListener, EventListenerOptions};
 use js_sys::Reflect;
 use send_wrapper::SendWrapper;
@@ -10,8 +11,6 @@ use web_sys::{
     wasm_bindgen::{JsCast, UnwrapThrowExt},
     Event, HtmlElement, KeyboardEvent, Window,
 };
-
-use crate::focus_event::{dispose_focus_event, KEYBORG_FOCUSIN};
 
 static LAST_ID: OnceLock<RwLock<usize>> = OnceLock::new();
 static KEYBORG_MAP: OnceLock<RwLock<Option<KeyborgMap>>> = OnceLock::new();
@@ -358,6 +357,8 @@ impl KeyborgCore {
         let listener =
             EventListener::new_with_options(&win, "touchcancel", options, on_mouse_or_touch);
         listener_list.push(SendWrapper::new(listener));
+
+        setup_focus_event(&win);
 
         Self {
             id: format!("c{id}"),
