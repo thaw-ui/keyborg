@@ -1,27 +1,37 @@
+use crate::js::WeakRef;
 use gloo_events::{EventListener, EventListenerOptions};
 use js_sys::{Reflect, Set};
 use send_wrapper::SendWrapper;
 use std::{
-    cell::RefCell, collections::HashMap, sync::{Arc, LazyLock, RwLock}
+    cell::RefCell,
+    collections::HashMap,
+    sync::{Arc, LazyLock, RwLock},
 };
 use wasm_bindgen::prelude::*;
 use web_sys::{
-    CustomEvent, CustomEventInit, Element, Event, EventTarget, FocusEvent, HtmlElement, Node, ShadowRoot, Window
+    CustomEvent, CustomEventInit, Element, Event, EventTarget, FocusEvent, HtmlElement, Node,
+    ShadowRoot, Window,
 };
-use crate::js::WeakRef;
 
 pub const KEYBORG_FOCUSIN: &'static str = "keyborg:focusin";
 pub const KEYBORG_FOCUSOUT: &'static str = "keyborg:focusout";
 
-static EVENT_LISTENER_MAP: LazyLock<RwLock<EventListenerMap>> = LazyLock::new(move || {
-    Default::default()
-});
+static EVENT_LISTENER_MAP: LazyLock<RwLock<EventListenerMap>> =
+    LazyLock::new(move || Default::default());
+
+static KEYBORG_DATA_LIST: LazyLock<RwLock<KeyborgDataList>> =
+    LazyLock::new(move || Default::default());
 
 #[derive(Debug, Default)]
 struct EventListenerMap(HashMap<&'static str, Vec<SendWrapper<(EventTarget, EventListener)>>>);
 
 impl EventListenerMap {
-    pub fn insert(&mut self, target: EventTarget, event_name: &'static str, listener: EventListener) {
+    pub fn insert(
+        &mut self,
+        target: EventTarget,
+        event_name: &'static str,
+        listener: EventListener,
+    ) {
         let event = SendWrapper::new((target, listener));
 
         if let Some(list) = self.0.get_mut(event_name) {
@@ -31,18 +41,41 @@ impl EventListenerMap {
         }
     }
 
-    pub fn remove(&mut self, target: &EventTarget, event_name: &'static str){
+    pub fn remove(&mut self, target: &EventTarget, event_name: &'static str) {
         if let Some(list) = self.0.get_mut(event_name) {
-            if let Some(index) = list.iter().position(|v|  &v.0 == target) {
+            if let Some(index) = list.iter().position(|v| &v.0 == target) {
                 list.remove(index);
             }
         }
     }
 }
 
+#[derive(Default)]
+struct KeyborgDataList(Vec<(SendWrapper<Window>, KeyborgData)>);
+
+impl KeyborgDataList {
+    pub fn push(&mut self, win: Window, data: KeyborgData) {
+        self.0.push((SendWrapper::new(win), data));
+    }
+
+    pub fn remove(&mut self, win: &Window) {
+        if let Some(index) = self.0.iter().position(|v| *v.0 == *win) {
+            self.0.remove(index);
+        }
+    }
+
+    pub fn find(&self, win: &Window) -> Option<&KeyborgData> {
+        if let Some((_, data)) = self.0.iter().find(|v| *v.0 == *win) {
+            Some(data)
+        } else {
+            None
+        }
+    }
+}
+
 struct KeyborgData {
-    focus_in_handler: Box<dyn Fn(&Event)>,
-    focus_out_handler: Box<dyn Fn(&Event)>,
+    focus_in_handler: Arc<dyn Fn(&Event) + Send + Sync + 'static>,
+    focus_out_handler: Arc<dyn Fn(&Event) + Send + Sync + 'static>,
 }
 
 fn can_override_native_focus(win: &Window) -> bool {
@@ -173,13 +206,11 @@ pub fn setup_focus_event(win: &Window) {
     };
 
     let on_focus_in = {
-        let shadow_targets = shadow_targets.clone();
-        let kwin = kwin.clone();
-        move |
-            target: &Element,
-            related_target: Option<HtmlElement>,
-            original_event: Option<FocusEvent>,
-        | {
+        let shadow_targets = SendWrapper::new(shadow_targets.clone());
+        let kwin = SendWrapper::new(kwin.clone());
+        move |target: &Element,
+              related_target: Option<HtmlElement>,
+              original_event: Option<FocusEvent>| {
             let shadow_root = target.shadow_root();
             if let Some(shadow_root) = shadow_root {
                 // https://bugs.chromium.org/p/chromium/issues/detail?id=1512028
@@ -206,7 +237,7 @@ pub fn setup_focus_event(win: &Window) {
                 //     > shadow root 2
                 //       > shadow root 3
                 //         > focused element
-        
+
                 // 3. focus event received by root l1 listener
                 // > document - capture listener ✅
                 //   > shadow root 1 - capture listener ✅ (focus event here)
@@ -229,20 +260,33 @@ pub fn setup_focus_event(win: &Window) {
                 //         > focused element ✅ (no shadow root - dispatch keyborg event)
 
                 for shadow_root_weak_ref in shadow_targets.values() {
-                    let shadow_root_weak_ref = shadow_root_weak_ref.unwrap_throw().dyn_into::<WeakRef>().unwrap_throw();
+                    let shadow_root_weak_ref = shadow_root_weak_ref
+                        .unwrap_throw()
+                        .dyn_into::<WeakRef>()
+                        .unwrap_throw();
                     if shadow_root_weak_ref.deref() == Some(shadow_root.clone().into()) {
                         return;
                     }
                 }
-    
-                // let mut event_listener_map = EVENT_LISTENER_MAP.write().unwrap_throw();
 
-                // let options = EventListenerOptions::run_in_capture_phase();
-                // let listener = EventListener::new_with_options(&shadow_root, "focusin", options, focus_in_handler);
-                // event_listener_map.insert(shadow_root.clone().into(), "focusin", listener);
-                // let options = EventListenerOptions::run_in_capture_phase();
-                // let listener = EventListener::new_with_options(&shadow_root, "focusout", options, focus_out_handler);
-                // event_listener_map.insert(shadow_root.clone().into(), "focusout", listener);
+                let mut event_listener_map = EVENT_LISTENER_MAP.write().unwrap_throw();
+                let keyborg_data_list = KEYBORG_DATA_LIST.read().unwrap_throw();
+                let keyborg_data = keyborg_data_list.find(&kwin).unwrap_throw();
+
+                let options = EventListenerOptions::run_in_capture_phase();
+                let focus_in_handler = keyborg_data.focus_in_handler.clone();
+                let listener =
+                    EventListener::new_with_options(&shadow_root, "focusin", options, move |e| {
+                        focus_in_handler(e)
+                    });
+                event_listener_map.insert(shadow_root.clone().into(), "focusin", listener);
+                let options = EventListenerOptions::run_in_capture_phase();
+                let focus_out_handler = keyborg_data.focus_out_handler.clone();
+                let listener =
+                    EventListener::new_with_options(&shadow_root, "focusout", options, move |e| {
+                        focus_out_handler(e)
+                    });
+                event_listener_map.insert(shadow_root.clone().into(), "focusout", listener);
 
                 shadow_targets.add(&WeakRef::new(shadow_root.into()));
                 return;
@@ -256,27 +300,53 @@ pub fn setup_focus_event(win: &Window) {
             // Tabster (and other users) can still use the legacy details field - keeping for backwards compat
             let details = js_sys::Object::new();
             if let Some(related_target) = related_target {
-                Reflect::set(&details, &JsValue::from_str("relatedTarget"), &related_target).unwrap_throw();
+                Reflect::set(
+                    &details,
+                    &JsValue::from_str("relatedTarget"),
+                    &related_target,
+                )
+                .unwrap_throw();
             }
             if let Some(original_event) = original_event {
-                Reflect::set(&details, &JsValue::from_str("originalEvent"), &original_event).unwrap_throw();
+                Reflect::set(
+                    &details,
+                    &JsValue::from_str("originalEvent"),
+                    &original_event,
+                )
+                .unwrap_throw();
             }
             init.set_detail(&details);
-            let event = CustomEvent::new_with_event_init_dict(KEYBORG_FOCUSIN, &init).unwrap_throw();
+            let event =
+                CustomEvent::new_with_event_init_dict(KEYBORG_FOCUSIN, &init).unwrap_throw();
 
             let data = kwin.get("__keyborgData").unwrap_throw();
-            
-            let last_focused_programmatically = Reflect::get(&data, &JsValue::from_str("lastFocusedProgrammatically")).unwrap_throw();
+
+            let last_focused_programmatically =
+                Reflect::get(&data, &JsValue::from_str("lastFocusedProgrammatically"))
+                    .unwrap_throw();
             let last_focused_programmatically = last_focused_programmatically.dyn_into::<WeakRef>();
 
-            if *CAN_OVERRIDE_NATIVE_FOCUS.read().unwrap_throw() || last_focused_programmatically.is_ok() {
-                let is_focused_programmatically = if let Ok(last_focused_programmatically) = last_focused_programmatically {
-                    Some(target.clone().into()) == last_focused_programmatically.deref()
-                } else {
-                    false
-                };
-                Reflect::set(&details, &JsValue::from_str("isFocusedProgrammatically"),&JsValue::from_bool(is_focused_programmatically)).unwrap_throw();
-                Reflect::set(&data, &JsValue::from_str("lastFocusedProgrammatically"),&JsValue::undefined()).unwrap_throw();
+            if *CAN_OVERRIDE_NATIVE_FOCUS.read().unwrap_throw()
+                || last_focused_programmatically.is_ok()
+            {
+                let is_focused_programmatically =
+                    if let Ok(last_focused_programmatically) = last_focused_programmatically {
+                        Some(target.clone().into()) == last_focused_programmatically.deref()
+                    } else {
+                        false
+                    };
+                Reflect::set(
+                    &details,
+                    &JsValue::from_str("isFocusedProgrammatically"),
+                    &JsValue::from_bool(is_focused_programmatically),
+                )
+                .unwrap_throw();
+                Reflect::set(
+                    &data,
+                    &JsValue::from_str("lastFocusedProgrammatically"),
+                    &JsValue::undefined(),
+                )
+                .unwrap_throw();
             }
 
             let _ = target.dispatch_event(&event);
@@ -285,7 +355,7 @@ pub fn setup_focus_event(win: &Window) {
 
     let focus_in_handler = {
         let on_focus_in = on_focus_in.clone();
-        let shadow_targets = shadow_targets.clone();
+        let shadow_targets = SendWrapper::new(shadow_targets.clone());
         move |event: &Event| {
             let e = event.dyn_ref::<FocusEvent>().unwrap_throw();
             let Some(target) = e.target() else {
@@ -332,22 +402,27 @@ pub fn setup_focus_event(win: &Window) {
                 }
             }
 
-            on_focus_in(&target, e.related_target().map(|t| t.dyn_into::<HtmlElement>().unwrap_throw()), None);
+            on_focus_in(
+                &target,
+                e.related_target()
+                    .map(|t| t.dyn_into::<HtmlElement>().unwrap_throw()),
+                None,
+            );
         }
     };
 
     let keyborg_data = KeyborgData {
-        focus_in_handler: Box::new(focus_in_handler.clone()),
-        focus_out_handler: Box::new(focus_out_handler.clone()),
+        focus_in_handler: Arc::new(focus_in_handler.clone()),
+        focus_out_handler: Arc::new(focus_out_handler.clone()),
     };
+
+    KEYBORG_DATA_LIST
+        .write()
+        .unwrap_throw()
+        .push(kwin.clone(), keyborg_data);
     let obj = js_sys::Object::new();
     Reflect::set(&obj, &JsValue::from_str("shadowTargets"), &shadow_targets).unwrap_throw();
     Reflect::set(&kwin, &JsValue::from_str("__keyborgData"), &obj).unwrap_throw();
-    // const data: KeyborgFocusEventData = (kwin.__keyborgData = {
-    //   focusInHandler,
-    //   focusOutHandler,
-    //   shadowTargets,
-    // });
 
     let doc = kwin.document().unwrap_throw();
     let mut event_listener_map = EVENT_LISTENER_MAP.write().unwrap_throw();
@@ -394,10 +469,14 @@ pub fn dispose_focus_event(win: Window) {
         event_listener_map.remove(&doc, "focusin");
         event_listener_map.remove(&doc, "focusout");
 
-        let shadow_targets = Reflect::get(&keyborg_data, &JsValue::from_str("shadowTargets")).unwrap_throw();
+        let shadow_targets =
+            Reflect::get(&keyborg_data, &JsValue::from_str("shadowTargets")).unwrap_throw();
         let shadow_targets = shadow_targets.dyn_into::<js_sys::Set>().unwrap_throw();
         for shadow_root_weak_ref in shadow_targets.values() {
-            let shadow_root_weak_ref = shadow_root_weak_ref.unwrap_throw().dyn_into::<WeakRef>().unwrap_throw();
+            let shadow_root_weak_ref = shadow_root_weak_ref
+                .unwrap_throw()
+                .dyn_into::<WeakRef>()
+                .unwrap_throw();
             let shadow_root = shadow_root_weak_ref.deref();
 
             if let Some(shadow_root) = shadow_root {
@@ -408,7 +487,14 @@ pub fn dispose_focus_event(win: Window) {
         }
 
         shadow_targets.clear();
-        Reflect::set(&kwin, &JsValue::from_str("__keyborgData"),&JsValue::undefined()).unwrap_throw();
+
+        KEYBORG_DATA_LIST.write().unwrap_throw().remove(&kwin);
+        Reflect::set(
+            &kwin,
+            &JsValue::from_str("__keyborgData"),
+            &JsValue::undefined(),
+        )
+        .unwrap_throw();
     }
 
     if let Some(orig_focus) = orig_focus {
